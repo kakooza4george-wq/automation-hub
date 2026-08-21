@@ -395,7 +395,14 @@ def fuzzy_match(target, candidates):
     return candidates[cs.index(ms[0])] if ms else None
 
 
-EFRIS_CONCURRENCY = 3  # number of invoices scraped in parallel
+EFRIS_CONCURRENCY = 1  # number of invoices scraped in parallel
+# Was 3, but on a 1GB Railway plan that pushed memory to the limit and
+# crashed multiple Chrome tabs at once (confirmed via Railway's own metrics
+# and deploy logs: memory hit ~1GB, followed by a flood of "tab crashed"
+# errors so fast it tripped Railway's log rate limiter). Each Chrome
+# instance needs real memory headroom that this plan doesn't have to spare
+# three times over. Raise this back up if the Railway plan is upgraded to
+# more memory.
 
 
 def run_efris_enrichment(purchases_df, log_placeholder, progress_bar):
@@ -440,16 +447,19 @@ def run_efris_enrichment(purchases_df, log_placeholder, progress_bar):
         work_q.put(fdn)
     results_q = queue.Queue()
 
+    def drain_as_failed(reason):
+        while True:
+            try:
+                fdn = work_q.get_nowait()
+            except queue.Empty:
+                return
+            results_q.put((fdn, [], reason))
+
     def worker():
         try:
             driver = _get_driver()
         except Exception as e:
-            while True:
-                try:
-                    fdn = work_q.get_nowait()
-                except queue.Empty:
-                    break
-                results_q.put((fdn, [], f"browser failed to start: {e}"))
+            drain_as_failed(f"browser failed to start: {e}")
             return
         try:
             while True:
@@ -462,6 +472,20 @@ def run_efris_enrichment(purchases_df, log_placeholder, progress_bar):
                     results_q.put((fdn, items, None))
                 except Exception as e:
                     results_q.put((fdn, [], str(e)))
+                    # A crashed tab (or a dead browser session generally)
+                    # otherwise dooms every FDN still left in this worker's
+                    # queue, since every call on a dead driver fails
+                    # instantly too — recreate it before continuing so one
+                    # crash costs a single invoice, not the rest of the run.
+                    try:
+                        driver.quit()
+                    except Exception:
+                        pass
+                    try:
+                        driver = _get_driver()
+                    except Exception as relaunch_err:
+                        drain_as_failed(f"browser failed to restart: {relaunch_err}")
+                        return
         finally:
             try:
                 driver.quit()
