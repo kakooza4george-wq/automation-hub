@@ -1,0 +1,8 @@
+streamlit
+openpyxl
+pandas
+numpy
+selenium
+pdfplumber
+requests
+xlrd
