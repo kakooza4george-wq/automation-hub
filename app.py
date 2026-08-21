@@ -279,7 +279,7 @@ def _get_driver():
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
     options.add_argument("--disable-gpu-sandbox")
-    options.add_argument("--window-size=1280,800")
+    options.add_argument("--window-size=1920,1080")
     options.add_argument("--no-zygote")
     options.add_argument("--disable-extensions")
     options.add_argument("--disable-software-rasterizer")
@@ -287,18 +287,6 @@ def _get_driver():
     options.add_argument("--disable-background-timer-throttling")
     options.add_argument("--disable-backgrounding-occluded-windows")
     options.add_argument("--disable-renderer-backgrounding")
-    # Memory-reduction flags for running multiple Chrome instances on a
-    # memory-constrained host: no images needed since scraping only reads
-    # the DOM/PDF, and a capped JS heap plus trimmed background services
-    # shrinks each instance's footprint without touching page behavior.
-    options.add_argument("--blink-settings=imagesEnabled=false")
-    options.add_argument("--disable-background-networking")
-    options.add_argument("--disable-sync")
-    options.add_argument("--disable-default-apps")
-    options.add_argument("--metrics-recording-only")
-    options.add_argument("--mute-audio")
-    options.add_argument("--no-first-run")
-    options.add_argument("--js-flags=--max-old-space-size=128")
     browser_candidates = [
         "/usr/bin/google-chrome", "/usr/bin/google-chrome-stable",
         "/usr/lib/chromium/chromium", "/usr/bin/chromium", "/usr/bin/chromium-browser",
@@ -392,20 +380,6 @@ def _scrape_fdn(driver, fdn, log_fn=None):
             items = _parse_pdf_bytes(pdf_bytes)
     except Exception as e:
         dbg(f"  [ERR] {e}")
-        # Most failures here are per-invoice (a bad FDN, a page that didn't
-        # behave as expected) and the driver itself is still fine — those
-        # are swallowed so the caller just moves on to the next invoice.
-        # But some mean the *browser* has died (a crashed tab under memory
-        # pressure, a dropped session) and every further call on this same
-        # driver will fail identically. Re-raise those specifically so the
-        # caller knows to replace the driver instead of silently returning
-        # an empty result for every remaining invoice on it.
-        fatal_markers = ("tab crashed", "session deleted", "disconnected",
-                          "chrome not reachable", "invalid session id",
-                          "target window already closed", "no such window",
-                          "connection refused")
-        if any(m in str(e).lower() for m in fatal_markers):
-            raise
     finally:
         try:
             driver.switch_to.default_content()
@@ -421,29 +395,7 @@ def fuzzy_match(target, candidates):
     return candidates[cs.index(ms[0])] if ms else None
 
 
-EFRIS_CONCURRENCY = 2  # number of invoices scraped in parallel
-# This crashed on a 1GB Railway plan (memory hit the limit, then a flood of
-# "tab crashed" errors so fast it tripped Railway's own log rate limiter).
-# Fixed several real bugs regardless of this number:
-#   - _get_driver() now launches Chrome with a lighter memory footprint
-#     (no images, capped JS heap, trimmed background services)
-#   - _scrape_fdn() used to swallow every error including a genuinely dead
-#     browser session, so a crash silently doomed every remaining invoice
-#     on that worker instead of triggering a relaunch -- it now re-raises
-#     browser-fatal errors specifically so the recovery below actually fires
-#   - each worker's browser is now recycled periodically (RECYCLE_EVERY),
-#     not just after a failure, since memory creeps up over a long run of
-#     successful invoices too and would eventually crash it anyway
-#   - a crash now retries the same invoice once on the fresh browser
-#     instead of just giving up on it
-# Tested under an actual 1GB memory cap (matching this Railway plan):
-# concurrency=1 stayed rock-solid at 35-46% memory across 60 invoices with
-# zero failures; concurrency=3 still spiked to 92-97% and crashed a tab.
-# 2 is an untested middle ground picked for a proportional memory budget --
-# raise this if the Railway plan is upgraded to more memory, or drop it
-# back to 1 if 2 still proves unstable in real use.
-# after an initial startup spike, vs. climbing to 84% by invoice 24 with
-# no recycling at all.
+EFRIS_CONCURRENCY = 3  # number of invoices scraped in parallel
 
 
 def run_efris_enrichment(purchases_df, log_placeholder, progress_bar):
@@ -488,76 +440,28 @@ def run_efris_enrichment(purchases_df, log_placeholder, progress_bar):
         work_q.put(fdn)
     results_q = queue.Queue()
 
-    def drain_as_failed(reason):
-        while True:
-            try:
-                fdn = work_q.get_nowait()
-            except queue.Empty:
-                return
-            results_q.put((fdn, [], reason))
-
-    RECYCLE_EVERY = 5  # relaunch each worker's browser every N invoices even
-    # without a crash -- Chrome's memory footprint creeps up over a long run
-    # of navigations even when nothing goes wrong (confirmed by measuring
-    # it: ~15% of a 1GB container after a handful of invoices, climbing
-    # past 80% by invoice 24 with no recycling at all), and on a
-    # memory-constrained host that eventually crashes it anyway. Recycling
-    # periodically keeps each browser's memory bounded instead of letting
-    # it grow for the length of the whole run.
-
     def worker():
         try:
             driver = _get_driver()
         except Exception as e:
-            drain_as_failed(f"browser failed to start: {e}")
+            while True:
+                try:
+                    fdn = work_q.get_nowait()
+                except queue.Empty:
+                    break
+                results_q.put((fdn, [], f"browser failed to start: {e}"))
             return
-        done_since_recycle = 0
-
-        def relaunch():
-            nonlocal driver, done_since_recycle
-            try:
-                driver.quit()
-            except Exception:
-                pass
-            driver = _get_driver()
-            done_since_recycle = 0
-
         try:
             while True:
                 try:
                     fdn = work_q.get_nowait()
                 except queue.Empty:
                     break
-
-                # Up to 2 attempts: a crashed tab (or dead browser session)
-                # dooms every further call on that same driver, so on
-                # failure the browser is relaunched and the SAME invoice is
-                # retried once on the fresh one -- a transient crash then
-                # costs time, not the invoice's data, instead of silently
-                # leaving it unfilled.
-                items, err = [], None
-                for attempt in range(2):
-                    try:
-                        items = _scrape_fdn(driver, fdn, log_fn=None)
-                        err = None
-                        break
-                    except Exception as e:
-                        err = str(e)
-                        try:
-                            relaunch()
-                        except Exception as relaunch_err:
-                            drain_as_failed(f"browser failed to restart: {relaunch_err}")
-                            return
-                results_q.put((fdn, items, err))
-
-                if err is None:
-                    done_since_recycle += 1
-                    if done_since_recycle >= RECYCLE_EVERY:
-                        try:
-                            relaunch()
-                        except Exception as relaunch_err:
-                            drain_as_failed(f"browser failed to restart: {relaunch_err}")
-                            return
+                try:
+                    items = _scrape_fdn(driver, fdn, log_fn=None)
+                    results_q.put((fdn, items, None))
+                except Exception as e:
+                    results_q.put((fdn, [], str(e)))
         finally:
             try:
                 driver.quit()
