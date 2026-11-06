@@ -26,4 +26,9 @@ EXPOSE 8501
 CMD ["streamlit", "run", "app.py", \
      "--server.port=8501", \
      "--server.address=0.0.0.0", \
-     "--server.headless=true"]
+     "--server.headless=true", \
+     "--theme.base=light", \
+     "--theme.primaryColor=#2F5BEA", \
+     "--theme.backgroundColor=#F5F6FA", \
+     "--theme.secondaryBackgroundColor=#EEF1F7", \
+     "--theme.textColor=#0F172A"]
