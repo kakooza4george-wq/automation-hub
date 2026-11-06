@@ -8,25 +8,250 @@ import random
 from io import BytesIO
 import difflib
 
-st.set_page_config(page_title="Automation Hub", layout="wide", page_icon="🤖")
+st.set_page_config(page_title="Automation Hub", layout="wide", page_icon="◆",
+                   initial_sidebar_state="expanded")
 
+# ─────────────────────────────────────────────────────────────────────────────
+# LOOK & FEEL
+# All styling lives here (not in .streamlit/config.toml) because the
+# Dockerfile only copies app.py into the image.
+# ─────────────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-    .stApp { background-color: #F3F3F3; color: #000000; font-family: 'Segoe UI', sans-serif; }
-    h1, h2, h3 { color: #0078D4; font-weight: 600; }
-    .stButton > button {
-        background-color: #0078D4; color: white; border-radius: 4px;
-        border: none; padding: 8px 16px; font-weight: 500;
-    }
-    .stButton > button:hover { background-color: #106EBE; }
-    p, li, span, div { color: #000000 !important; }
-    .log-box {
-        background: #1e1e1e; color: #00ff88; font-family: monospace;
-        font-size: 13px; padding: 12px 16px; border-radius: 6px;
-        max-height: 400px; overflow-y: auto; white-space: pre-wrap;
-    }
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+:root {
+    --ink:        #0F172A;
+    --ink-soft:   #475569;
+    --ink-faint:  #94A3B8;
+    --canvas:     #F5F6FA;
+    --surface:    #FFFFFF;
+    --line:       #E4E7EE;
+    --navy:       #0B1B34;
+    --navy-2:     #12284A;
+    --accent:     #2F5BEA;
+    --accent-2:   #1E44C4;
+    --accent-soft:#EAF0FF;
+    --gold:       #C8A24A;
+    --radius:     14px;
+    --shadow:     0 1px 2px rgba(15,23,42,.04), 0 4px 16px rgba(15,23,42,.06);
+}
+
+/* ── Base ─────────────────────────────────────────────────────────────── */
+html, body, .stApp, [class*="css"] {
+    font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
+}
+.stApp { background: var(--canvas); color: var(--ink); }
+.stApp p, .stApp li, .stApp label, .stApp span { color: var(--ink); }
+[data-testid="stHeader"] { background: transparent; }
+.block-container { padding-top: 2.2rem; padding-bottom: 4rem; max-width: 1180px; }
+h1, h2, h3, h4 { color: var(--ink); font-weight: 650; letter-spacing: -0.015em; }
+hr { border-color: var(--line) !important; margin: 1.6rem 0 !important; }
+code { color: var(--accent-2); background: var(--accent-soft); border-radius: 6px; }
+
+/* ── Sidebar ──────────────────────────────────────────────────────────── */
+[data-testid="stSidebar"] {
+    background: linear-gradient(180deg, var(--navy) 0%, var(--navy-2) 100%);
+    border-right: 1px solid rgba(255,255,255,.06);
+}
+[data-testid="stSidebar"] * { color: #CBD5E1; }
+[data-testid="stSidebar"] .brand {
+    display: flex; align-items: center; gap: 12px;
+    padding: 6px 4px 22px 4px; margin-bottom: 8px;
+    border-bottom: 1px solid rgba(255,255,255,.08);
+}
+[data-testid="stSidebar"] .brand-mark {
+    width: 38px; height: 38px; border-radius: 10px;
+    background: linear-gradient(135deg, var(--gold), #E9CF8A);
+    display: flex; align-items: center; justify-content: center;
+    color: var(--navy) !important; font-weight: 700; font-size: 17px;
+}
+[data-testid="stSidebar"] .brand-name { color: #FFFFFF !important; font-weight: 650; font-size: 16px; line-height: 1.2; }
+[data-testid="stSidebar"] .brand-sub  { color: #8FA3C0 !important; font-size: 12px; }
+[data-testid="stSidebar"] .nav-label {
+    font-size: 11px; letter-spacing: .12em; text-transform: uppercase;
+    color: #6F84A3 !important; margin: 18px 4px 6px 4px; font-weight: 600;
+}
+/* Navigation radio rendered as a menu */
+[data-testid="stSidebar"] [role="radiogroup"] { gap: 2px; width: 100%; }
+[data-testid="stSidebar"] [data-testid="stRadio"], [data-testid="stSidebar"] [data-testid="stRadio"] > div { width: 100%; }
+[data-testid="stSidebar"] [role="radiogroup"] > label {
+    width: 100%; padding: 9px 12px; border-radius: 10px; margin: 0;
+    transition: background .15s ease;
+}
+[data-testid="stSidebar"] [role="radiogroup"] > label:hover { background: rgba(255,255,255,.06); }
+[data-testid="stSidebar"] [data-testid="stRadioOption"] > div > div > div:first-child:not([data-testid]) { display: none; }
+[data-testid="stSidebar"] [role="radiogroup"] > label p { font-size: 14px; color: #CBD5E1 !important; }
+[data-testid="stSidebar"] [role="radiogroup"] > label:has(input:checked) {
+    background: rgba(47,91,234,.22);
+    box-shadow: inset 3px 0 0 var(--gold);
+}
+[data-testid="stSidebar"] [role="radiogroup"] > label:has(input:checked) p { color: #FFFFFF !important; font-weight: 600; }
+[data-testid="stSidebar"] .side-foot {
+    margin-top: 28px; padding: 14px; border-radius: 12px;
+    background: rgba(255,255,255,.04); border: 1px solid rgba(255,255,255,.07);
+    font-size: 12px; line-height: 1.5;
+}
+[data-testid="stSidebar"] .side-foot b { color: #FFFFFF !important; }
+
+/* ── Hero / page header ───────────────────────────────────────────────── */
+.hero {
+    position: relative; overflow: hidden;
+    background: linear-gradient(120deg, var(--navy) 0%, #17336A 60%, var(--accent) 140%);
+    border-radius: 20px; padding: 30px 34px; margin-bottom: 26px;
+    box-shadow: 0 10px 30px rgba(11,27,52,.18);
+}
+.hero::after {
+    content: ""; position: absolute; right: -60px; top: -60px;
+    width: 260px; height: 260px; border-radius: 50%;
+    background: radial-gradient(circle, rgba(200,162,74,.35), transparent 70%);
+}
+.hero .eyebrow {
+    color: var(--gold) !important; font-size: 12px; font-weight: 600;
+    letter-spacing: .14em; text-transform: uppercase; margin-bottom: 8px;
+}
+.hero h1, .hero h1 span { color: #FFFFFF !important; font-size: 30px; margin: 0 0 8px 0; padding: 0; }
+.hero [data-testid="stHeaderActionElements"] { display: none; }
+.hero b { color: #FFFFFF !important; }
+[data-testid="stAppDeployButton"] { display: none; }
+.hero p  { color: #C7D3EA !important; font-size: 15px; margin: 0; max-width: 760px; line-height: 1.6; }
+.hero .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; position: relative; z-index: 1; }
+.hero .chip {
+    font-size: 12px; padding: 5px 11px; border-radius: 999px;
+    background: rgba(255,255,255,.10); border: 1px solid rgba(255,255,255,.16);
+    color: #E2E8F5 !important;
+}
+
+/* ── Section titles ───────────────────────────────────────────────────── */
+.section-title { display: flex; align-items: baseline; gap: 10px; margin: 6px 0 2px 0; }
+.section-title .num {
+    font-size: 11px; font-weight: 700; color: var(--accent) !important;
+    background: var(--accent-soft); border-radius: 6px; padding: 2px 7px;
+}
+.section-title .txt { font-size: 16px; font-weight: 650; color: var(--ink) !important; }
+.section-sub { color: var(--ink-soft) !important; font-size: 13.5px; margin: 0 0 12px 0; }
+
+/* ── Cards (st.container(border=True)) ────────────────────────────────── */
+[data-testid="stVerticalBlockBorderWrapper"],
+div[data-testid="stVerticalBlock"][class*="border"] {
+    background: var(--surface);
+    border: 1px solid var(--line) !important;
+    border-radius: var(--radius) !important;
+    box-shadow: var(--shadow);
+}
+.info-card {
+    background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 18px 22px; box-shadow: var(--shadow); margin-bottom: 16px;
+}
+.info-card p, .info-card li { color: var(--ink-soft) !important; font-size: 14px; line-height: 1.65; }
+.info-card b, .info-card strong { color: var(--ink) !important; }
+.info-card .formula {
+    font-family: 'JetBrains Mono', monospace; font-size: 13px;
+    background: var(--accent-soft); color: var(--accent-2) !important;
+    padding: 8px 12px; border-radius: 8px; display: inline-block; margin: 4px 0;
+}
+.info-card .note {
+    margin-top: 10px; padding: 10px 12px; border-radius: 10px;
+    background: #FFF8E8; border: 1px solid #F1DFAF; color: #7A5B12 !important; font-size: 13px;
+}
+
+/* ── Inputs ───────────────────────────────────────────────────────────── */
+[data-baseweb="input"], [data-baseweb="select"] > div {
+    border-radius: 10px !important; border-color: var(--line) !important; background: #FBFCFE !important;
+}
+[data-baseweb="input"]:focus-within { border-color: var(--accent) !important; box-shadow: 0 0 0 3px rgba(47,91,234,.12); }
+[data-testid="stWidgetLabel"] p { font-weight: 550; font-size: 13.5px; color: var(--ink) !important; }
+
+/* Horizontal radios as segmented pills */
+.main [role="radiogroup"][aria-orientation="horizontal"],
+section.main [role="radiogroup"] { gap: 8px; }
+[data-testid="stMain"] [role="radiogroup"] > label {
+    border: 1px solid var(--line); background: #FBFCFE; border-radius: 10px;
+    padding: 7px 14px 7px 10px; margin-right: 0;
+}
+[data-testid="stMain"] [role="radiogroup"] > label:has(input:checked) {
+    border-color: var(--accent); background: var(--accent-soft);
+}
+
+/* File uploader */
+[data-testid="stFileUploaderDropzone"] {
+    background: #FAFBFF; border: 1.5px dashed #C9D3EA; border-radius: 12px;
+    transition: border-color .15s ease, background .15s ease;
+}
+[data-testid="stFileUploaderDropzone"]:hover { border-color: var(--accent); background: var(--accent-soft); }
+[data-testid="stFileUploaderDropzone"] button {
+    border-radius: 8px !important; border: 1px solid var(--line) !important;
+    background: #FFFFFF !important; color: var(--ink) !important;
+}
+
+/* ── Buttons ──────────────────────────────────────────────────────────── */
+.stButton > button, .stDownloadButton > button {
+    border-radius: 10px; font-weight: 600; padding: 10px 20px;
+    border: 1px solid var(--line); background: var(--surface); color: var(--ink);
+    transition: all .15s ease;
+}
+.stButton > button:hover, .stDownloadButton > button:hover {
+    border-color: var(--accent); color: var(--accent);
+}
+.stButton > button[kind="primary"], .stDownloadButton > button[kind="primary"] {
+    background: linear-gradient(135deg, var(--accent) 0%, var(--accent-2) 100%);
+    border: none; color: #FFFFFF;
+    box-shadow: 0 6px 16px rgba(47,91,234,.28);
+}
+.stButton > button[kind="primary"] p, .stDownloadButton > button[kind="primary"] p { color: #FFFFFF !important; }
+.stButton > button[kind="primary"]:hover, .stDownloadButton > button[kind="primary"]:hover {
+    transform: translateY(-1px); box-shadow: 0 10px 22px rgba(47,91,234,.34); color: #FFFFFF;
+}
+.stButton > button:disabled { opacity: .45; box-shadow: none; transform: none; }
+
+/* ── Feedback ─────────────────────────────────────────────────────────── */
+[data-testid="stAlert"] { border-radius: 12px; border: 1px solid var(--line); }
+[data-testid="stExpander"] {
+    border: 1px solid var(--line); border-radius: 12px; background: var(--surface);
+}
+[data-testid="stExpander"] summary p { font-weight: 600; }
+[data-testid="stDataFrame"] { border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+.stProgress > div > div > div > div { background: linear-gradient(90deg, var(--accent), var(--gold)); }
+
+.log-box {
+    background: #0B1220; color: #9FE8C3; font-family: 'JetBrains Mono', monospace;
+    font-size: 12.5px; padding: 16px 18px; border-radius: 12px;
+    max-height: 400px; overflow-y: auto; white-space: pre-wrap;
+    border: 1px solid #1C2A44; box-shadow: inset 0 1px 0 rgba(255,255,255,.03);
+}
+.log-box * { color: #9FE8C3 !important; }
+
+/* Coming soon */
+.soon {
+    text-align: center; padding: 56px 24px; border: 1.5px dashed #CBD5E1;
+    border-radius: 18px; background: var(--surface);
+}
+.soon .badge {
+    display: inline-block; font-size: 11px; font-weight: 700; letter-spacing: .12em;
+    text-transform: uppercase; color: #7A5B12 !important; background: #FFF4D6;
+    border-radius: 999px; padding: 4px 12px; margin-bottom: 12px;
+}
+.soon h3 { margin: 0 0 6px 0; }
+.soon p  { color: var(--ink-soft) !important; margin: 0; }
+
+#MainMenu, footer { visibility: hidden; }
 </style>
 """, unsafe_allow_html=True)
+
+
+def _hero(eyebrow, title, text, chips=()):
+    chips_html = "".join(f'<span class="chip">{c}</span>' for c in chips)
+    st.markdown(
+        f'<div class="hero"><div class="eyebrow">{eyebrow}</div><h1>{title}</h1>'
+        f'<p>{text}</p>' + (f'<div class="chips">{chips_html}</div>' if chips else '') + '</div>',
+        unsafe_allow_html=True)
+
+
+def _section(num, title, sub=None):
+    st.markdown(
+        f'<div class="section-title"><span class="num">{num}</span><span class="txt">{title}</span></div>'
+        + (f'<p class="section-sub">{sub}</p>' if sub else ''),
+        unsafe_allow_html=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -112,27 +337,38 @@ def _allocate_by_volume(total, volumes, jitter=0.15):
     return alloc
 
 
-def _volume_scaled_diffs(actuals, max_pct=0.03, max_gap=15, shortage_prob=0.7):
+def _volume_scaled_diffs(actuals, max_pct=0.03, max_gap=15, shortage_prob=0.7,
+                         zero_prob_small=0.65, zero_prob_big=0.10):
     """
     Expected-minus-actual differences for one product's days, scaled to
     each day's volume: a random size up to about `max_pct` (3%) of the
     actual figure, never more than `max_gap` (15) units however big the
     day. A 20-unit day is usually off by 0-1; an 800-unit day by up to 15.
 
-    The sizes are drawn at random and then re-sorted onto the days by
-    volume, so a smaller day never has a bigger gap than a larger day.
-    Each gap is a shortage (expected above actual) with `shortage_prob`
-    (70%) probability, otherwise an excess (expected below actual).
+    Not every day has a difference. Each day first gets a chance of
+    matching exactly (expected = actual) that depends on its volume
+    relative to the product's busiest day: about `zero_prob_small` (65%)
+    for the quietest days, falling to `zero_prob_big` (10%) for the busiest.
+
+    Among the days that do have a gap, the sizes are drawn at random and
+    re-sorted onto those days by volume, so a smaller day never has a
+    bigger gap than a larger one. Each gap is a shortage (expected above
+    actual) with `shortage_prob` (70%) probability, otherwise an excess.
     """
     actuals = np.asarray(actuals, dtype=float)
     n = len(actuals)
-    if n == 0:
-        return np.zeros(0, dtype=int)
-    sizes = np.round(actuals * np.random.uniform(0, max_pct, size=n)).astype(int)
-    sizes = np.minimum(sizes, max_gap)
     out = np.zeros(n, dtype=int)
-    by_volume = np.argsort(-actuals, kind="stable")
-    out[by_volume] = np.sort(sizes)[::-1]
+    if n == 0 or actuals.max() <= 0:
+        return out
+    rel = actuals / actuals.max()
+    p_zero = zero_prob_big + (zero_prob_small - zero_prob_big) * (1 - rel)
+    has_gap = np.random.random(n) >= p_zero
+    idx = np.where(has_gap)[0]
+    if len(idx):
+        sizes = np.round(actuals[idx] * np.random.uniform(0, max_pct, size=len(idx))).astype(int)
+        sizes = np.minimum(sizes, max_gap)
+        by_volume = idx[np.argsort(-actuals[idx], kind="stable")]
+        out[by_volume] = np.sort(sizes)[::-1]
     signs = np.where(np.random.random(n) < shortage_prob, 1, -1)
     return out * signs
 
@@ -1969,85 +2205,123 @@ def _render_sm_config_editor():
 # NAVIGATION
 # ─────────────────────────────────────────────────────────────────────────────
 
-st.sidebar.title("Navigation")
-tool = st.sidebar.selectbox("Select Tool", [
+TOOLS = [
     "Excel Stock Movement Filler",
     "EFRIS Invoice Enricher",
     "Raw Material Movement Filler",
     "Audit Compliance Checker (Coming Soon)",
     "Financial Report Generator (Coming Soon)",
     "Sales Dashboard (Coming Soon)",
-])
+]
+TOOL_LABELS = {
+    "Excel Stock Movement Filler":              "▤  Stock Movement Filler",
+    "EFRIS Invoice Enricher":                   "◈  EFRIS Invoice Enricher",
+    "Raw Material Movement Filler":             "⚗  Raw Material Filler",
+    "Audit Compliance Checker (Coming Soon)":   "○  Audit Compliance · soon",
+    "Financial Report Generator (Coming Soon)": "○  Financial Reports · soon",
+    "Sales Dashboard (Coming Soon)":            "○  Sales Dashboard · soon",
+}
 
-st.title("Automation Hub")
-st.markdown("Your professional platform for automating tasks.")
+with st.sidebar:
+    st.markdown(
+        '<div class="brand"><div class="brand-mark">A</div>'
+        '<div><div class="brand-name">Automation Hub</div>'
+        '<div class="brand-sub">Stock &amp; finance workflows</div></div></div>'
+        '<div class="nav-label">Tools</div>',
+        unsafe_allow_html=True)
+    tool = st.radio("Select Tool", TOOLS, format_func=lambda t: TOOL_LABELS.get(t, t),
+                    label_visibility="collapsed", key="nav_tool")
+    st.markdown(
+        '<div class="side-foot"><b>Tip</b><br>Files are processed in memory and are never '
+        'stored. Download your result before switching tools.</div>',
+        unsafe_allow_html=True)
 
 
 # ── TOOL 1 UI ────────────────────────────────────────────────────────────────
 if tool == "Excel Stock Movement Filler":
-    st.header("Excel Stock Movement Filler")
-    output_name   = st.text_input("Output Filename", value="filled_template")
-    output_name   = output_name.removesuffix(".xlsx").strip() + ".xlsx"
+    _hero("Tool 01 · Inventory",
+          "Stock Movement Filler",
+          "Fill your daily stock movement template from the system movement report. "
+          "Damages are spread across production days in proportion to volume, and "
+          "expected vs actual figures are generated automatically.",
+          chips=("Template + movement report", "Damages optional", "90 / 10 production · packaging"))
 
-    match_label = st.radio(
-        "Match products by",
-        ["Product Code (existing)", "Product Name"],
-        horizontal=True,
-        help="Product Code: uses the short code in column C of your template (the usual bakery-style "
-             "template). Product Name: matches on the full product name instead — use this when column "
-             "C holds something else (like a unit of measure) instead of a unique per-product code."
-    )
-    match_by = "code" if match_label == "Product Code (existing)" else "name"
+    with st.container(border=True):
+        _section("01", "Settings", "How the output is named and how products are matched to the template.")
+        s1, s2 = st.columns([1, 1.4], gap="large")
+        with s1:
+            output_name = st.text_input("Output filename", value="filled_template")
+            output_name = output_name.removesuffix(".xlsx").strip() + ".xlsx"
+        with s2:
+            match_label = st.radio(
+                "Match products by",
+                ["Product Code (existing)", "Product Name"],
+                horizontal=True,
+                help="Product Code: uses the short code in column C of your template (the usual bakery-style "
+                     "template). Product Name: matches on the full product name instead — use this when column "
+                     "C holds something else (like a unit of measure) instead of a unique per-product code."
+            )
+        match_by = "code" if match_label == "Product Code (existing)" else "name"
 
-    template_file = st.file_uploader("Upload Template (.xlsx)", type="xlsx")
-    report_file   = st.file_uploader("Upload Movement Report (.xlsx)", type="xlsx")
-    damages_file  = st.file_uploader(
-        "Upload Damages (.xlsx) — optional",
-        type="xlsx",
-        help="Leave empty if this business doesn't track damages separately; damages will be treated as zero."
-    )
-    if st.button("Process Files"):
+    with st.container(border=True):
+        _section("02", "Source files", "Template and movement report are required; damages are optional.")
+        f1, f2, f3 = st.columns(3, gap="medium")
+        with f1:
+            template_file = st.file_uploader("Template (.xlsx)", type="xlsx")
+        with f2:
+            report_file   = st.file_uploader("Movement report (.xlsx)", type="xlsx")
+        with f3:
+            damages_file  = st.file_uploader(
+                "Damages (.xlsx) — optional",
+                type="xlsx",
+                help="Leave empty if this business doesn't track damages separately; damages will be treated as zero."
+            )
+
+    if st.button("Process files", type="primary", use_container_width=True):
         if template_file and report_file:
-            with st.spinner("Processing..."):
+            with st.spinner("Filling your template…"):
                 out = process_excel(template_file, report_file, damages_file, output_name, match_by=match_by)
                 if out:
-                    st.success("Done!")
-                    st.download_button("Download", data=out, file_name=output_name,
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                    st.success(f"Your template is ready — **{output_name}**")
+                    st.download_button("⬇  Download filled template", data=out, file_name=output_name,
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        type="primary", use_container_width=True)
         else:
             st.warning("Upload the Template and Movement Report.")
 
 
 # ── TOOL 2 UI ────────────────────────────────────────────────────────────────
 elif tool == "EFRIS Invoice Enricher":
-    st.header("EFRIS Invoice Enricher")
-    st.markdown("""
-    Upload your **Purchases Report** (.xlsx or .xls — the URA "VAT Purchases Report"
-    export works directly) with columns **FDN** and **Description of Goods**.
-    The tool opens each invoice on EFRIS, reads the PDF, and fills in
-    **Quantity**, **Unit Measure**, and **Unit Price** for every row.
-    > Duplicate FDNs are only fetched once.
-    """)
-    col1, col2 = st.columns([2, 1])
-    with col1:
-        purchases_file = st.file_uploader("Upload Purchases Report (.xlsx or .xls)", type=["xlsx", "xls"], key="ef_up")
-    with col2:
-        out_name = st.text_input("Output Filename", value="enriched_purchases", key="ef_out")
-        out_name = out_name.removesuffix(".xlsx").strip() + ".xlsx"
-    if purchases_file:
-        try:
-            prev = _read_purchases_report(purchases_file)
-            purchases_file.seek(0)
-            st.markdown("**Preview:**")
-            st.dataframe(prev.head(5), use_container_width=True)
-            missing = {"FDN", "Description of Goods"} - set(prev.columns)
-            if missing:
-                st.error(f"Missing columns: {missing}")
-                purchases_file = None
-        except Exception as e:
-            st.error(str(e)); purchases_file = None
-    if st.button("🚀 Start Enrichment", disabled=(purchases_file is None), key="ef_run"):
-        st.markdown("---")
+    _hero("Tool 02 · Tax & Purchases",
+          "EFRIS Invoice Enricher",
+          "Upload your Purchases Report (the URA “VAT Purchases Report” export works directly) "
+          "with <b>FDN</b> and <b>Description of Goods</b>. Each invoice is opened on EFRIS and "
+          "<b>Quantity</b>, <b>Unit Measure</b> and <b>Unit Price</b> are filled for every row.",
+          chips=("Duplicate FDNs fetched once", ".xlsx or .xls", "Then value your stock"))
+
+    with st.container(border=True):
+        _section("01", "Purchases report", "Required columns: FDN and Description of Goods.")
+        col1, col2 = st.columns([2, 1], gap="large")
+        with col1:
+            purchases_file = st.file_uploader("Purchases Report (.xlsx or .xls)", type=["xlsx", "xls"], key="ef_up")
+        with col2:
+            out_name = st.text_input("Output filename", value="enriched_purchases", key="ef_out")
+            out_name = out_name.removesuffix(".xlsx").strip() + ".xlsx"
+        if purchases_file:
+            try:
+                prev = _read_purchases_report(purchases_file)
+                purchases_file.seek(0)
+                st.caption("Preview — first 5 rows")
+                st.dataframe(prev.head(5), use_container_width=True)
+                missing = {"FDN", "Description of Goods"} - set(prev.columns)
+                if missing:
+                    st.error(f"Missing columns: {missing}")
+                    purchases_file = None
+            except Exception as e:
+                st.error(str(e)); purchases_file = None
+
+    if st.button("Start enrichment", type="primary", use_container_width=True,
+                 disabled=(purchases_file is None), key="ef_run"):
         prog   = st.progress(0, text="Starting...")
         log_ph = st.empty()
         try:
@@ -2065,162 +2339,176 @@ elif tool == "EFRIS Invoice Enricher":
     # disappearing the moment a different widget is interacted with.
     if "efris_enriched_df" in st.session_state:
         enriched = st.session_state["efris_enriched_df"]
-        st.success("Complete!")
-        st.download_button("⬇️ Download Enriched Excel",
-            data=build_output_excel(enriched),
-            file_name=st.session_state.get("efris_out_name", out_name),
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="ef_download")
         filled = enriched["Quantity"].notna().sum()
-        st.info(f"📊 {filled} / {len(enriched)} rows enriched.")
+        with st.container(border=True):
+            m1, m2, m3 = st.columns([1, 1, 1.4])
+            m1.metric("Rows enriched", f"{filled:,}")
+            m2.metric("Total rows", f"{len(enriched):,}")
+            with m3:
+                st.download_button("⬇  Download enriched Excel",
+                    data=build_output_excel(enriched),
+                    file_name=st.session_state.get("efris_out_name", out_name),
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="ef_download", type="primary", use_container_width=True)
 
     # Value Stock is intentionally NOT gated on having just run an
     # enrichment in this session — if you already have a previously
     # downloaded enriched Purchases Report, you can upload it directly and
     # skip re-running EFRIS enrichment entirely.
-    st.markdown("---")
-    st.subheader("📦 Value Stock")
-    st.markdown("""
-    Value your closing stock using the **unit price from each item's latest
-    purchase invoice**.
-    """)
+    st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
+    with st.container(border=True):
+        _section("02", "Value stock",
+                 "Value your closing stock using the unit price from each item's latest purchase invoice.")
 
-    has_session_data = "efris_enriched_df" in st.session_state
-    if has_session_data:
-        source_choice = st.radio(
-            "Enriched purchases data",
-            ["Use the result from the enrichment above", "Upload an enriched Purchases Report instead"],
-            key="sv_source")
-    else:
-        source_choice = "Upload an enriched Purchases Report instead"
-        st.caption("No enrichment run yet this session — upload a previously-downloaded "
-                   "enriched Purchases Report (the file with Quantity/Unit Measure/Unit "
-                   "Price already filled in) to continue.")
+        has_session_data = "efris_enriched_df" in st.session_state
+        if has_session_data:
+            source_choice = st.radio(
+                "Enriched purchases data",
+                ["Use the result from the enrichment above", "Upload an enriched Purchases Report instead"],
+                key="sv_source", horizontal=True)
+        else:
+            source_choice = "Upload an enriched Purchases Report instead"
+            st.caption("No enrichment run yet this session — upload a previously-downloaded "
+                       "enriched Purchases Report (the file with Quantity/Unit Measure/Unit "
+                       "Price already filled in) to continue.")
 
-    enriched_for_valuation = None
-    if source_choice == "Use the result from the enrichment above":
-        enriched_for_valuation = st.session_state["efris_enriched_df"]
-    else:
-        enriched_upload = st.file_uploader(
-            "Upload enriched Purchases Report (.xlsx or .xls)",
-            type=["xlsx", "xls"], key="sv_enriched_up")
-        if enriched_upload:
-            try:
-                enriched_for_valuation = pd.read_excel(enriched_upload)
-                missing = {"Description of Goods", "Unit Price", "Invoice Date"} - set(enriched_for_valuation.columns)
-                if missing:
-                    st.error(f"Missing columns in enriched file: {missing}")
-                    enriched_for_valuation = None
-            except Exception as e:
-                st.error(str(e))
+        enriched_for_valuation = None
+        v1, v2 = st.columns(2, gap="medium")
+        if source_choice == "Use the result from the enrichment above":
+            enriched_for_valuation = st.session_state["efris_enriched_df"]
+        else:
+            with v1:
+                enriched_upload = st.file_uploader(
+                    "Enriched Purchases Report (.xlsx or .xls)",
+                    type=["xlsx", "xls"], key="sv_enriched_up")
+            if enriched_upload:
+                try:
+                    enriched_for_valuation = pd.read_excel(enriched_upload)
+                    missing = {"Description of Goods", "Unit Price", "Invoice Date"} - set(enriched_for_valuation.columns)
+                    if missing:
+                        st.error(f"Missing columns in enriched file: {missing}")
+                        enriched_for_valuation = None
+                except Exception as e:
+                    st.error(str(e))
 
-    stock_file = st.file_uploader("Upload Stock List (.xlsx or .xls)", type=["xlsx", "xls"], key="sv_up")
-    if st.button("💰 Value Stock", disabled=(stock_file is None or enriched_for_valuation is None), key="sv_run"):
+        with (v2 if source_choice != "Use the result from the enrichment above" else v1):
+            stock_file = st.file_uploader("Stock List (.xlsx or .xls)", type=["xlsx", "xls"], key="sv_up")
+
+    if st.button("Value stock", type="primary", use_container_width=True,
+                 disabled=(stock_file is None or enriched_for_valuation is None), key="sv_run"):
         try:
             stock_df = _read_stock_list(stock_file)
             valued_df, val_log, total_value = value_stock(enriched_for_valuation, stock_df)
+            st.metric("Total stock value", f"UGX {total_value:,.2f}")
             st.markdown('<div class="log-box">' + "<br>".join(val_log) + "</div>", unsafe_allow_html=True)
-            st.success(f"✅ Stock valued — total value: UGX {total_value:,.2f}")
-            st.download_button("⬇️ Download Valued Stock List",
+            st.download_button("⬇  Download valued stock list",
                 data=build_output_excel(
                     valued_df, sheet_name="Stock Valuation",
                     highlight_cols=("Matched Purchase Item", "Unit Price",
                                      "Latest Invoice Date", "Stock Value")),
                 file_name="stock_valuation.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="sv_download")
+                key="sv_download", type="primary", use_container_width=True)
         except Exception as e:
             st.error(f"Error: {e}")
 
 
 # ── TOOL 3 UI ────────────────────────────────────────────────────────────────
 elif tool == "Raw Material Movement Filler":
-    st.header("Raw Material Movement Filler")
-    st.markdown("""
-    Calculates **STOCK ISSUED TO PRODUCTION** for every raw material, every day —
-    derived from the **EXPECTED** quantities in the finished goods movement and your
-    company's **standard mix** ratios.
+    _hero("Tool 03 · Production",
+          "Raw Material Movement Filler",
+          "Calculates <b>Stock Issued to Production</b> for every raw material, every day — "
+          "derived from the finished goods movement and your company's standard mix ratios. "
+          "All existing template formulas are preserved.",
+          chips=("Standard mix: upload or configure", "Uses Tool 01 output", "Optional purchases fill"))
 
-    **How it works:**
-    - For each day and each raw material:
-      **Issued = Σ (input/unit ratio × EXPECTED quantity)** across all finished products
-    - The result is written into the *STOCK ISSUED TO PRODUCTION* column of your
-      raw material template. All existing formulas (Bal b/f carry-forwards, totals, etc.)
-      are preserved.
+    with st.expander("How it works"):
+        st.markdown(
+            '<div class="info-card" style="margin:0;box-shadow:none;border:none;padding:4px 2px;">'
+            '<p>For each day and each raw material:</p>'
+            '<span class="formula">Issued = Σ (input/unit ratio × EXPECTED quantity)</span>'
+            '<p>across all finished products. The result is written into the <b>STOCK ISSUED TO '
+            'PRODUCTION</b> column of your raw material template. Bal b/f carry-forwards, totals '
+            'and other formulas stay intact.</p>'
+            '<div class="note">⚠ All products in the finished movement <b>must</b> be present in the '
+            'standard mix. The tool lists any missing ones and stops before making changes.</div>'
+            '</div>',
+            unsafe_allow_html=True)
 
-    > ⚠️  All products in the finished movement **must** be present in the standard mix.
-    > The tool will list any missing ones and stop before making changes.
-    """)
-
-    st.markdown("---")
-    sm_mode = st.radio(
-        "Standard Mix source",
-        ["Upload Excel file", "Configure in-app"],
-        key="rm_sm_mode", horizontal=True,
-        help="Upload your existing Standard Mix Excel file, or build/edit one directly in the app."
-    )
+    with st.container(border=True):
+        _section("01", "Data sources", "Where the standard mix and finished quantities come from.")
+        r1, r2 = st.columns(2, gap="large")
+        with r1:
+            sm_mode = st.radio(
+                "Standard Mix source",
+                ["Upload Excel file", "Configure in-app"],
+                key="rm_sm_mode", horizontal=True,
+                help="Upload your existing Standard Mix Excel file, or build/edit one directly in the app."
+            )
+        with r2:
+            fm_mode_label = st.radio(
+                "Finished Movement quantity source",
+                ["Expected quantity (existing)", "Stock Received (Kombucha-style)"],
+                key="rm_fm_mode", horizontal=True,
+                help="Expected quantity: reads Tool 1's EXPECTED column, for a bakery-style Tool 1 output. "
+                     "Stock Received: reads Tool 1's STOCK RECEIVED column instead, for a Kombucha-style "
+                     "output where raw material usage is driven by units received into stock that day."
+            )
+        fm_mode = "expected" if fm_mode_label == "Expected quantity (existing)" else "stock_in"
 
     sm_file = None
     if sm_mode == "Configure in-app":
-        st.markdown("#### Configure Standard Mix")
-        _render_sm_config_editor()
-        st.markdown("---")
+        with st.container(border=True):
+            _section("01b", "Configure standard mix")
+            _render_sm_config_editor()
 
-    fm_mode_label = st.radio(
-        "Finished Movement quantity source",
-        ["Expected quantity (existing)", "Stock Received (Kombucha-style)"],
-        key="rm_fm_mode", horizontal=True,
-        help="Expected quantity: reads Tool 1's EXPECTED column, for a bakery-style Tool 1 output. "
-             "Stock Received: reads Tool 1's STOCK RECEIVED column instead, for a Kombucha-style "
-             "output where raw material usage is driven by units received into stock that day."
-    )
-    fm_mode = "expected" if fm_mode_label == "Expected quantity (existing)" else "stock_in"
-
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        if sm_mode == "Upload Excel file":
-            sm_file = st.file_uploader(
-                "① Standard Mix (.xlsx)",
-                type="xlsx", key="rm_sm",
-                help="Your company's standard mix with products and raw material ratios."
+    with st.container(border=True):
+        _section("02", "Files")
+        c1, c2, c3 = st.columns(3, gap="medium")
+        with c1:
+            if sm_mode == "Upload Excel file":
+                sm_file = st.file_uploader(
+                    "① Standard Mix (.xlsx)",
+                    type="xlsx", key="rm_sm",
+                    help="Your company's standard mix with products and raw material ratios."
+                )
+            else:
+                cfg = st.session_state.get("rm_config", _empty_rm_config())
+                st.markdown("**① Standard Mix**")
+                st.caption(f"Using configured standard mix — {len(cfg['materials'])} material(s), "
+                           f"{len(cfg['products'])} product(s).")
+        with c2:
+            fm_file = st.file_uploader(
+                "② Finished Goods Movement (.xlsx)",
+                type="xlsx", key="rm_fm",
+                help="Output of Tool 1 — EXPECTED or STOCK RECEIVED column, matching the source picked above."
             )
-        else:
-            cfg = st.session_state.get("rm_config", _empty_rm_config())
-            st.markdown("**① Standard Mix**")
-            st.caption(f"Using configured standard mix — {len(cfg['materials'])} material(s), "
-                       f"{len(cfg['products'])} product(s).")
-    with c2:
-        fm_file = st.file_uploader(
-            "② Finished Goods Movement (.xlsx)",
-            type="xlsx", key="rm_fm",
-            help="Output of Tool 1 — EXPECTED or STOCK RECEIVED column, matching the source picked above."
-        )
-    with c3:
-        rm_file = st.file_uploader(
-            "③ Raw Material Template (.xlsx)",
-            type="xlsx", key="rm_tpl",
-            help="Your blank raw material movement template (company-specific)."
-        )
+        with c3:
+            rm_file = st.file_uploader(
+                "③ Raw Material Template (.xlsx)",
+                type="xlsx", key="rm_tpl",
+                help="Your blank raw material movement template (company-specific)."
+            )
 
-    with st.expander("④ Optional: fill STOCK RECEIVED from a Purchases Report"):
-        st.caption(
-            "Raw material stock actually starts at purchasing, not at production — without this, "
-            "STOCK ISSUED TO PRODUCTION gets filled but STOCK RECEIVED stays empty and the sheet's "
-            "running Balance drifts negative. Upload Tool 2's enriched Purchases Report (with the "
-            "raw material item names already edited to match this standard mix, and quantities "
-            "already converted to the units this template uses) and it'll fill STOCK RECEIVED Qty "
-            "and Unit Price for each raw material on the exact day it was purchased, within this "
-            "template's own date range. Purchased items that don't match a material, or materials "
-            "with no matching purchases, are left alone. Leave this empty to skip it entirely."
-        )
-        purchases_file = st.file_uploader(
-            "Enriched Purchases Report (.xlsx)",
-            type="xlsx", key="rm_purchases",
-            help="Output of Tool 2's EFRIS Invoice Enricher."
-        )
+        with st.expander("④ Optional: fill STOCK RECEIVED from a Purchases Report"):
+            st.caption(
+                "Raw material stock actually starts at purchasing, not at production — without this, "
+                "STOCK ISSUED TO PRODUCTION gets filled but STOCK RECEIVED stays empty and the sheet's "
+                "running Balance drifts negative. Upload Tool 2's enriched Purchases Report (with the "
+                "raw material item names already edited to match this standard mix, and quantities "
+                "already converted to the units this template uses) and it'll fill STOCK RECEIVED Qty "
+                "and Unit Price for each raw material on the exact day it was purchased, within this "
+                "template's own date range. Purchased items that don't match a material, or materials "
+                "with no matching purchases, are left alone. Leave this empty to skip it entirely."
+            )
+            purchases_file = st.file_uploader(
+                "Enriched Purchases Report (.xlsx)",
+                type="xlsx", key="rm_purchases",
+                help="Output of Tool 2's EFRIS Invoice Enricher."
+            )
 
-    out_name_rm = st.text_input("Output Filename", value="raw_material_filled", key="rm_out")
-    out_name_rm = out_name_rm.removesuffix(".xlsx").strip() + ".xlsx"
+        out_name_rm = st.text_input("Output filename", value="raw_material_filled", key="rm_out")
+        out_name_rm = out_name_rm.removesuffix(".xlsx").strip() + ".xlsx"
 
     # Show previews of each uploaded file. Converted to strings before
     # display — a raw header=None read mixes real dates with blank
@@ -2268,8 +2556,8 @@ elif tool == "Raw Material Movement Filler":
             st.info("Configure at least one material and one product above, and upload the "
                      "Finished Goods Movement and Raw Material Template, to proceed.")
 
-    if st.button("⚙️  Generate Raw Material Movement", disabled=not all_uploaded, key="rm_run"):
-        st.markdown("---")
+    if st.button("Generate raw material movement", type="primary", use_container_width=True,
+                 disabled=not all_uploaded, key="rm_run"):
         log_ph = st.empty()
         with st.spinner("Processing..."):
             if sm_mode == "Upload Excel file":
@@ -2287,12 +2575,13 @@ elif tool == "Raw Material Movement Filler":
             unsafe_allow_html=True
         )
         if out_bytes:
-            st.success("✅ Processing complete!")
+            st.success("Processing complete!")
             st.download_button(
-                "⬇️ Download Filled Raw Material Movement",
+                "⬇  Download filled raw material movement",
                 data=out_bytes,
                 file_name=out_name_rm,
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                type="primary", use_container_width=True
             )
         else:
             st.error("Processing failed. See the log above for details.")
@@ -2300,7 +2589,9 @@ elif tool == "Raw Material Movement Filler":
 
 # ── COMING SOON ──────────────────────────────────────────────────────────────
 elif "Coming Soon" in tool:
-    st.info("Feature coming soon.")
-
-st.sidebar.markdown("---")
-st.sidebar.info("Powered by Streamlit on Railway.")
+    name = tool.replace(" (Coming Soon)", "")
+    _hero("On the roadmap", name, "This tool is being built and will appear here when it's ready.")
+    st.markdown(
+        f'<div class="soon"><div class="badge">Coming soon</div><h3>{name}</h3>'
+        '<p>Use the tools in the sidebar in the meantime.</p></div>',
+        unsafe_allow_html=True)
