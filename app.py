@@ -1,4 +1,4 @@
-import os, time, re, glob
+import os, time, re, glob, json
 import streamlit as st
 import openpyxl
 import pandas as pd
@@ -45,7 +45,99 @@ def excel_serial_to_date(serial):
         return serial.date()
     return None
 
-def process_excel(template_file, report_file, damages_file, output_name="filled_template.xlsx"):
+def _find_header_col(ws, contains, header_rows=range(1, 6)):
+    """
+    Finds the column of the first header cell (within the first few rows)
+    whose text contains `contains` (case-insensitive). Used in 'name' match
+    mode to locate the STOCK RECEIVED / STOCK SOLD / Damages quantity
+    columns dynamically, since a non-Mityana-style template (e.g. an extra
+    Discount column) can shift these away from the hardcoded positions the
+    'code' mode relies on.
+    """
+    target = re.sub(r'\s+', ' ', contains.upper()).strip()
+    for r in header_rows:
+        for c in range(1, ws.max_column + 1):
+            v = ws.cell(r, c).value
+            if isinstance(v, str) and target in re.sub(r'\s+', ' ', v.upper()):
+                return c
+    return None
+
+
+def _template_row_key(ws, r, match_by):
+    """
+    The per-row identifier used to line up a template row with movement
+    report / damages rows. 'code' (default) reads the short product code
+    from column C, as bakery-style templates provide. 'name' instead uses
+    the normalised full product name (column B) as the key — for templates
+    like Kombucha's where column C holds a unit of measure (e.g. "BOXES")
+    that's shared by multiple products and would collide if used as a key.
+    """
+    full = ws.cell(r, 2).value
+    if match_by == "name":
+        return normalize_name(full) if full else None
+    return ws.cell(r, 3).value
+
+
+def _allocate_by_volume(total, volumes, jitter=0.15):
+    """
+    Splits an integer `total` across days in proportion to each day's
+    `volumes` (stock-in), so the counts always sum to exactly `total`.
+
+    Uses the largest-remainder method: each day gets floor(total * share),
+    and the few units left over go to the days with the biggest fractional
+    remainders. Low-volume days whose share is well under 1 therefore get 0.
+
+    To avoid an obviously mechanical pattern, the shares are first nudged
+    by a small random factor (±`jitter`). The resulting counts are then
+    re-sorted onto the days by volume, so a smaller day never ends up with
+    more than a larger day.
+    """
+    volumes = np.asarray(volumes, dtype=float)
+    n = len(volumes)
+    alloc = np.zeros(n, dtype=int)
+    if total <= 0 or n == 0 or volumes.sum() <= 0:
+        return alloc
+    noisy = volumes * np.random.uniform(1 - jitter, 1 + jitter, size=n)
+    quotas = total * noisy / noisy.sum()
+    counts = np.floor(quotas).astype(int)
+    leftover = total - counts.sum()
+    if leftover > 0:
+        # Random tie-break key keeps equal remainders from always favouring
+        # the earliest day.
+        order = np.lexsort((np.random.random(n), -(quotas - counts)))
+        counts[order[:leftover]] += 1
+    # Biggest count goes to the biggest-volume day, and so on down.
+    by_volume = np.argsort(-volumes, kind="stable")
+    alloc[by_volume] = np.sort(counts)[::-1]
+    return alloc
+
+
+def _volume_scaled_diffs(actuals, max_pct=0.03, max_gap=15, shortage_prob=0.7):
+    """
+    Expected-minus-actual differences for one product's days, scaled to
+    each day's volume: a random size up to about `max_pct` (3%) of the
+    actual figure, never more than `max_gap` (15) units however big the
+    day. A 20-unit day is usually off by 0-1; an 800-unit day by up to 15.
+
+    The sizes are drawn at random and then re-sorted onto the days by
+    volume, so a smaller day never has a bigger gap than a larger day.
+    Each gap is a shortage (expected above actual) with `shortage_prob`
+    (70%) probability, otherwise an excess (expected below actual).
+    """
+    actuals = np.asarray(actuals, dtype=float)
+    n = len(actuals)
+    if n == 0:
+        return np.zeros(0, dtype=int)
+    sizes = np.round(actuals * np.random.uniform(0, max_pct, size=n)).astype(int)
+    sizes = np.minimum(sizes, max_gap)
+    out = np.zeros(n, dtype=int)
+    by_volume = np.argsort(-actuals, kind="stable")
+    out[by_volume] = np.sort(sizes)[::-1]
+    signs = np.where(np.random.random(n) < shortage_prob, 1, -1)
+    return out * signs
+
+
+def process_excel(template_file, report_file, damages_file=None, output_name="filled_template.xlsx", match_by="code"):
     try:
         template_bytes = template_file.read()
         wb_temp = openpyxl.load_workbook(BytesIO(template_bytes))
@@ -61,7 +153,10 @@ def process_excel(template_file, report_file, damages_file, output_name="filled_
             raise ValueError("No dates found in template")
         template_year = template_first_date.year
         report_df  = pd.read_excel(report_file)
-        damages_df = pd.read_excel(damages_file)
+        if damages_file is not None:
+            damages_df = pd.read_excel(damages_file)
+        else:
+            damages_df = pd.DataFrame(columns=['good name', 'quantity'])
         report_df['date'] = pd.to_datetime(report_df['date'], dayfirst=True)
         report_df['date'] = report_df['date'].apply(lambda d: d.replace(year=template_year))
         report_df_sorted = report_df.sort_values(['abbreviations', 'date'])
@@ -98,7 +193,7 @@ def process_excel(template_file, report_file, damages_file, output_name="filled_
         norm_to_abr = {}
         for r in range(1, ws.max_row + 1):
             full = ws.cell(r, 2).value
-            abr  = ws.cell(r, 3).value
+            abr  = _template_row_key(ws, r, match_by)
             if full and abr:
                 product_map[str(full).strip().upper()] = abr
                 norm_to_abr[normalize_name(full)] = abr
@@ -131,7 +226,7 @@ def process_excel(template_file, report_file, damages_file, output_name="filled_
             date_val = ws.cell(r, 1).value
             if date_val:
                 current_date = excel_serial_to_date(date_val)
-            abr = ws.cell(r, 3).value
+            abr = _template_row_key(ws, r, match_by)
             if current_date and abr:
                 date_abr_to_row[(current_date, abr)] = r
         if date_abr_to_row:
@@ -158,41 +253,79 @@ def process_excel(template_file, report_file, damages_file, output_name="filled_
             total_stock_in = stock_ins.sum()
             if total_stock_in == 0:
                 continue
-            weights    = stock_ins / total_stock_in
-            prod_d     = int(total_d * 3 / 4)
+            # 90% production / 10% packaging (the "4.5 : 0.5" split),
+            # rounded half-up in integer maths so the two always sum to
+            # total_d exactly.
+            prod_d     = (total_d * 9 + 5) // 10
             pack_d     = total_d - prod_d
-            prod_alloc = np.zeros(len(days), dtype=int)
-            pack_alloc = np.zeros(len(days), dtype=int)
-            for _ in range(prod_d):
-                prod_alloc[np.random.choice(len(days), p=weights)] += 1
-            for _ in range(pack_d):
-                pack_alloc[np.random.choice(len(days), p=weights)] += 1
+            # Proportional to each day's stock-in: busy days get more,
+            # quiet days get few or none, and the totals stay exact.
+            prod_alloc = _allocate_by_volume(prod_d, stock_ins)
+            pack_alloc = _allocate_by_volume(pack_d, stock_ins)
             damages_per_day[abr] = {days[i]: (prod_alloc[i], pack_alloc[i]) for i in range(len(days))}
-        for _, irow in ins_df.iterrows():
-            dt       = irow['date'].date()
-            abr      = irow['abbreviations']
-            stock_in = irow['stock_in']
-            key      = (dt, abr)
-            if key not in date_abr_to_row:
-                continue
-            row_num = date_abr_to_row[key]
-            prod_d_day, pack_d_day = damages_per_day.get(abr, {}).get(dt, (0, 0))
-            total_d_day = prod_d_day + pack_d_day
-            ws.cell(row_num, 7).value  = stock_in + total_d_day
-            ws.cell(row_num, 8).value  = prod_d_day
-            ws.cell(row_num, 10).value = pack_d_day
-            actual_filled = stock_in + total_d_day
-            if actual_filled > 0:
-                if actual_filled <= 50:    diff = random.randint(-1, 1)
-                elif actual_filled <= 200: diff = random.randint(-4, 6)
-                else:                      diff = random.randint(-6, 12)
-                ws.cell(row_num, 6).value = max(0, actual_filled + diff)
-        for _, orow in outs_df.iterrows():
-            dt  = orow['date'].date()
-            abr = orow['abbreviations']
-            key = (dt, abr)
-            if key in date_abr_to_row:
-                ws.cell(date_abr_to_row[key], 13).value = orow['sales']
+        if match_by == "name":
+            # Column positions aren't hardcoded here — a non-Mityana-style
+            # template (e.g. Kombucha's, with an extra Discount column) can
+            # shift STOCK RECEIVED / STOCK SOLD away from columns 6-13, so
+            # they're located by their header text instead.
+            recv_col = _find_header_col(ws, "STOCK RECEIVED")
+            sold_col = _find_header_col(ws, "STOCK SOLD")
+            dmg_col  = _find_header_col(ws, "DAMAGE") or _find_header_col(ws, "SPOIL")
+            if recv_col is None or sold_col is None:
+                raise ValueError(
+                    "Could not find 'STOCK RECEIVED' / 'STOCK SOLD' columns in the template "
+                    "header — check the header row wording matches."
+                )
+            for _, irow in ins_df.iterrows():
+                dt       = irow['date'].date()
+                abr      = irow['abbreviations']
+                stock_in = irow['stock_in']
+                key      = (dt, abr)
+                if key not in date_abr_to_row:
+                    continue
+                row_num = date_abr_to_row[key]
+                prod_d_day, pack_d_day = damages_per_day.get(abr, {}).get(dt, (0, 0))
+                total_d_day = prod_d_day + pack_d_day
+                ws.cell(row_num, recv_col).value = stock_in + total_d_day
+                if dmg_col is not None and total_d_day:
+                    ws.cell(row_num, dmg_col).value = total_d_day
+            for _, orow in outs_df.iterrows():
+                dt  = orow['date'].date()
+                abr = orow['abbreviations']
+                key = (dt, abr)
+                if key in date_abr_to_row:
+                    ws.cell(date_abr_to_row[key], sold_col).value = orow['sales']
+        else:
+            filled_rows = {}  # abr -> [(row_num, actual_filled), ...]
+            for _, irow in ins_df.iterrows():
+                dt       = irow['date'].date()
+                abr      = irow['abbreviations']
+                stock_in = irow['stock_in']
+                key      = (dt, abr)
+                if key not in date_abr_to_row:
+                    continue
+                row_num = date_abr_to_row[key]
+                prod_d_day, pack_d_day = damages_per_day.get(abr, {}).get(dt, (0, 0))
+                total_d_day = prod_d_day + pack_d_day
+                ws.cell(row_num, 7).value  = stock_in + total_d_day
+                ws.cell(row_num, 8).value  = prod_d_day
+                ws.cell(row_num, 10).value = pack_d_day
+                filled_rows.setdefault(abr, []).append((row_num, stock_in + total_d_day))
+            # Expected (col 6) vs actual (col 7): the gap scales with the
+            # day's volume and is ranked per product, so bigger production
+            # days show bigger excesses/shortages than smaller ones.
+            for abr, rows in filled_rows.items():
+                actuals = [a for _, a in rows]
+                diffs   = _volume_scaled_diffs(actuals)
+                for (row_num, actual_filled), diff in zip(rows, diffs):
+                    if actual_filled > 0:
+                        ws.cell(row_num, 6).value = max(0, actual_filled + int(diff))
+            for _, orow in outs_df.iterrows():
+                dt  = orow['date'].date()
+                abr = orow['abbreviations']
+                key = (dt, abr)
+                if key in date_abr_to_row:
+                    ws.cell(date_abr_to_row[key], 13).value = orow['sales']
         output_bytes = BytesIO()
         wb.save(output_bytes)
         output_bytes.seek(0)
@@ -1030,9 +1163,15 @@ def _eval_domestic_formula(row, domestic_formulas, production_by_row, memo, visi
     return result
 
 
-def _parse_finished_movement(fm_bytes):
+def _parse_finished_movement(fm_bytes, qty_col=6):
     """
-    Reads col B (product name) and col F (EXPECTED) for every row.
+    Reads col B (product name) and a quantity column for every row —
+    col F / EXPECTED (col 6) by default, matching a bakery-style Tool 1
+    output. Pass qty_col=<detected column> to read a different quantity
+    instead, e.g. STOCK RECEIVED for a Kombucha-style Tool 1 output where
+    raw material consumption is driven by units received into stock that
+    day rather than an EXPECTED column.
+
     expected_map  keyed by (date, NORM_PRODUCT_NAME)
     fm_products   set of original product name strings (for display in errors)
 
@@ -1056,7 +1195,7 @@ def _parse_finished_movement(fm_bytes):
     for r in range(1, ws.max_row + 1):
         date_v = ws.cell(r, 1).value
         name_v = ws.cell(r, 2).value   # col B — product full name
-        exp_v  = ws.cell(r, 6).value   # col F — EXPECTED
+        exp_v  = ws.cell(r, qty_col).value
 
         if isinstance(date_v, datetime):
             current_date = date_v.date()
@@ -1085,6 +1224,27 @@ def _parse_finished_movement(fm_bytes):
         expected_map[key] = expected_map.get(key, 0.0) + qty
 
     return expected_map, fm_products
+
+
+def _parse_finished_movement_stock_in(fm_bytes):
+    """
+    Kombucha-style alternative to _parse_finished_movement: raw material
+    consumption there is driven by units *received into stock* that day
+    (bottled/produced), not an EXPECTED column — Tool 1's Kombucha-style
+    output (Product Name match mode) has no EXPECTED column at all, but
+    does have STOCK RECEIVED. Locates that column by its header text (same
+    detection Tool 1 uses) and reads it the same way _parse_finished_movement
+    reads EXPECTED, reusing that function so both stay in sync.
+    """
+    wb = openpyxl.load_workbook(BytesIO(fm_bytes), data_only=True)
+    ws = wb.active
+    recv_col = _find_header_col(ws, "STOCK RECEIVED")
+    if recv_col is None:
+        raise ValueError(
+            "Could not find a 'STOCK RECEIVED' column in this Finished Goods Movement file — "
+            "check the header row wording, or switch to 'Expected quantity' mode instead."
+        )
+    return _parse_finished_movement(fm_bytes, qty_col=recv_col)
 
 
 def _match_product_name(fm_name, sm_norm_names):
@@ -1247,6 +1407,129 @@ def _smart_match_materials(tpl_materials, sm_materials):
     return match_map, unmatched
 
 
+def _clean_numeric(v):
+    """Parses a possibly comma-formatted numeric cell (e.g. "1,250.00");
+    returns None if it isn't a usable number — same cleanup already applied
+    to Unit Price elsewhere (_latest_unit_prices, value_stock)."""
+    try:
+        return float(str(v).replace(",", "").strip())
+    except (ValueError, TypeError):
+        return None
+
+
+def _parse_purchases_for_rm(purchases_bytes, sm_material_names, date_start, date_end):
+    """
+    Reads an enriched Purchases Report (Tool 2's output) and extracts
+    per-material, per-day totals to fill STOCK RECEIVED in the Raw
+    Material Movement output — raw material stock actually starts at
+    purchasing, not at production, and without this the sheet's own
+    running Balance formula drifts negative even though the materials
+    were genuinely bought.
+
+    Only rows whose Invoice Date falls within [date_start, date_end] (the
+    Raw Material Template's own date range) are considered — the purchases
+    report can span far more months than the one currently being processed.
+
+    Matches each purchase row's 'Description of Goods' against
+    sm_material_names using the same exact-then-fuzzy matcher used
+    elsewhere in Tool 3 for template <-> standard-mix material matching.
+    A purchased item that doesn't match any material, or a material with
+    no matching purchases, is simply left alone — no fill, no error.
+
+    Multiple purchase lines for the same material on the same day are
+    combined: quantities sum, and price is the quantity-weighted average.
+
+    Returns (received_map, log_lines) where received_map is
+    {(date, sm_material_name): (total_qty, avg_price)}.
+    """
+    log_lines = []
+    df = pd.read_excel(BytesIO(purchases_bytes))
+    missing = {"Description of Goods", "Quantity", "Unit Price", "Invoice Date"} - set(df.columns)
+    if missing:
+        raise ValueError(f"Enriched Purchases Report is missing column(s): {missing}")
+
+    df = df.copy()
+    df["_date"] = pd.to_datetime(df["Invoice Date"], dayfirst=True, errors="coerce").dt.date
+    df = df[df["_date"].notna() & (df["_date"] >= date_start) & (df["_date"] <= date_end)]
+    df["_qty"] = df["Quantity"].apply(_clean_numeric)
+    df["_price"] = df["Unit Price"].apply(_clean_numeric)
+    df = df[df["_qty"].notna() & df["_price"].notna() & (df["_qty"] > 0)]
+
+    if df.empty:
+        log_lines.append("  ℹ️  No purchase rows fall within this template's date range "
+                          "(or none have a valid quantity/price) — nothing to fill.")
+        return {}, log_lines
+
+    distinct_items = df["Description of Goods"].astype(str).str.strip().unique().tolist()
+    purchase_tuples = [(i, name, '') for i, name in enumerate(distinct_items)]
+    sm_tuples = [(i, name, '') for i, name in enumerate(sm_material_names)]
+    match_map, unmatched = _smart_match_materials(purchase_tuples, sm_tuples)
+
+    df["_material"] = df["Description of Goods"].astype(str).str.strip().map(match_map)
+    matched_df = df[df["_material"].notna()]
+
+    received_map = {}
+    for (date, material), group in matched_df.groupby(["_date", "_material"]):
+        total_qty = group["_qty"].sum()
+        if total_qty <= 0:
+            continue
+        avg_price = (group["_qty"] * group["_price"]).sum() / total_qty
+        received_map[(date, material)] = (total_qty, avg_price)
+
+    for item in distinct_items:
+        sm_name = match_map.get(item)
+        tag = "EXACT" if sm_name and item.upper().strip() == sm_name.upper().strip() else ("FUZZY" if sm_name else "NO MATCH")
+        if sm_name:
+            log_lines.append(f"       ✓ [{tag:8}]  '{item}'  →  '{sm_name}'")
+        else:
+            log_lines.append(f"       ✗ [NO MATCH]  '{item}'  →  skipped (not in standard mix)")
+
+    if unmatched:
+        log_lines.append(f"  ⚠️  {len(unmatched)} purchased item(s) skipped — no matching raw material")
+    log_lines.append(f"  ✅ {len(received_map)} date-material entr{'y' if len(received_map) == 1 else 'ies'} "
+                      f"ready to fill from purchases")
+
+    return received_map, log_lines
+
+
+def _fill_stock_received(ws, tpl_materials, date_to_block_start, match_map, received_map):
+    """
+    Writes STOCK RECEIVED Qty + Unit Price into the raw material template
+    from received_map (see _parse_purchases_for_rm), reusing the same
+    tpl_materials/date_to_block_start/match_map structures Step 6 already
+    built so the rows line up exactly. The Qty column is located by header
+    text the same way Tool 1's name-match mode locates its columns; Price
+    is always the next column over, matching the Qty/Price/Amount block
+    convention used throughout these templates. Only cells with matching
+    purchase data are touched — any existing value (formula or figure) in
+    those two cells is overwritten with the real purchased quantity/price;
+    everything else (Amount, Balance, materials with no purchases) is left
+    exactly as it was.
+    """
+    recv_col = _find_header_col(ws, "STOCK RECEIVED")
+    if recv_col is None:
+        return None
+    price_col = recv_col + 1
+
+    sm_to_offset = {}
+    for offset, tpl_name, _ in tpl_materials:
+        sm_name = match_map.get(tpl_name)
+        if sm_name:
+            sm_to_offset[sm_name] = offset
+
+    filled = 0
+    for (date, sm_name), (qty, price) in received_map.items():
+        offset = sm_to_offset.get(sm_name)
+        block_start = date_to_block_start.get(date)
+        if offset is None or block_start is None:
+            continue
+        row = block_start + offset
+        ws.cell(row, recv_col).value = round(qty, 4)
+        ws.cell(row, price_col).value = round(price, 4)
+        filled += 1
+    return filled
+
+
 def _calculate_and_fill(wb, ws, tpl_materials, date_to_block_start,
                          match_map, products, expected_map, fm_name_to_sm_norm,
                          materials, domestic_formulas):
@@ -1313,30 +1596,35 @@ def _calculate_and_fill(wb, ws, tpl_materials, date_to_block_start,
     return wb, filled
 
 
-def process_raw_material_movement(sm_file, fm_file, rm_template_file, output_name):
-    """Master function called from Streamlit UI."""
-    log = []
-    def L(msg): log.append(msg)
+def _run_raw_material_calc(products, sm_materials, domestic_formulas, fm_file, rm_template_file, output_name, log, L,
+                            fm_mode="expected", purchases_file=None):
+    """
+    Shared by both the Excel-parsed standard mix path and the in-app
+    configured standard mix path — Steps 2-6 are identical either way, so
+    both paths are guaranteed to produce identical output for equivalent
+    standard-mix data. Returns (out_bytes_or_None, log).
 
+    fm_mode picks how the Finished Goods Movement file's quantity gets
+    read: "expected" (default) reads the EXPECTED column, matching a
+    bakery-style Tool 1 output; "stock_in" reads STOCK RECEIVED instead,
+    for a Kombucha-style Tool 1 output where raw material consumption is
+    driven by units received into stock that day, not an EXPECTED figure.
+
+    purchases_file is optional — when provided (Tool 2's enriched Purchases
+    Report), Step 7 fills STOCK RECEIVED Qty/Price from real purchases so
+    the sheet's running Balance reflects actual stock instead of drifting
+    negative. Omitted entirely, behavior is unchanged from before this
+    existed.
+    """
     try:
-        # ── Step 1: Standard Mix ─────────────────────────────────────────────
-        L("📋 Step 1 — Parsing standard mix...")
-        sm_bytes  = sm_file.read()
-        products, sm_materials, domestic_formulas = _parse_standard_mix(sm_bytes)
-        L(f"  ✅ {len(products)} finished product(s) | {len(sm_materials)} named line(s) in "
-          f"standard mix (ingredients, and possibly packaging/cross-product/labour if used)")
-        if domestic_formulas:
-            L(f"  ✅ Domestic usage section found — {len(domestic_formulas)} row(s) with a formula")
-        else:
-            L("  ℹ️  No domestic usage section found in this standard mix — domestic usage will be 0")
-        L("  📦 Products in standard mix:")
-        for norm, p in products.items():
-            L(f"       • {p['name']}")
-
         # ── Step 2: Finished Movement ────────────────────────────────────────
-        L("📋 Step 2 — Parsing finished movement (EXPECTED column)...")
         fm_bytes  = fm_file.read()
-        expected_map, fm_products = _parse_finished_movement(fm_bytes)
+        if fm_mode == "stock_in":
+            L("📋 Step 2 — Parsing finished movement (STOCK RECEIVED column)...")
+            expected_map, fm_products = _parse_finished_movement_stock_in(fm_bytes)
+        else:
+            L("📋 Step 2 — Parsing finished movement (EXPECTED column)...")
+            expected_map, fm_products = _parse_finished_movement(fm_bytes)
         non_zero  = sum(1 for v in expected_map.values() if v > 0)
         L(f"  ✅ {len(fm_products)} product name(s) | "
           f"{len(expected_map)} date-product pairs ({non_zero} with data)")
@@ -1409,6 +1697,24 @@ def process_raw_material_movement(sm_file, fm_file, rm_template_file, output_nam
         )
         L(f"  ✅ {filled} cell(s) written to STOCK ISSUED TO PRODUCTION (col I)")
 
+        # ── Step 7 (optional): Fill STOCK RECEIVED from purchases ─────────────
+        if purchases_file is not None:
+            L("🧾 Step 7 — Filling STOCK RECEIVED from the enriched Purchases Report...")
+            purchases_bytes = purchases_file.read()
+            date_start = min(date_to_block_start)
+            date_end = max(date_to_block_start)
+            sm_material_names = [name for _, name, _ in sm_materials]
+            received_map, purchase_log = _parse_purchases_for_rm(
+                purchases_bytes, sm_material_names, date_start, date_end
+            )
+            for line in purchase_log:
+                L(line)
+            recv_filled = _fill_stock_received(ws, tpl_materials, date_to_block_start, match_map, received_map)
+            if recv_filled is None:
+                L("  ⚠️  Could not find a 'STOCK RECEIVED' column in this template — skipped.")
+            else:
+                L(f"  ✅ {recv_filled} cell(s) filled in STOCK RECEIVED (Qty + Unit Price)")
+
         out = BytesIO()
         wb_out.save(out)
         out.seek(0)
@@ -1420,6 +1726,243 @@ def process_raw_material_movement(sm_file, fm_file, rm_template_file, output_nam
         L(f"❌ Error: {str(e)}")
         L(traceback.format_exc())
         return None, log
+
+
+def process_raw_material_movement(sm_file, fm_file, rm_template_file, output_name, fm_mode="expected",
+                                   purchases_file=None):
+    """Master function called from Streamlit UI — Standard Mix Excel path."""
+    log = []
+    def L(msg): log.append(msg)
+
+    try:
+        # ── Step 1: Standard Mix ─────────────────────────────────────────────
+        L("📋 Step 1 — Parsing standard mix...")
+        sm_bytes  = sm_file.read()
+        products, sm_materials, domestic_formulas = _parse_standard_mix(sm_bytes)
+        L(f"  ✅ {len(products)} finished product(s) | {len(sm_materials)} named line(s) in "
+          f"standard mix (ingredients, and possibly packaging/cross-product/labour if used)")
+        if domestic_formulas:
+            L(f"  ✅ Domestic usage section found — {len(domestic_formulas)} row(s) with a formula")
+        else:
+            L("  ℹ️  No domestic usage section found in this standard mix — domestic usage will be 0")
+        L("  📦 Products in standard mix:")
+        for norm, p in products.items():
+            L(f"       • {p['name']}")
+    except Exception as e:
+        import traceback
+        L(f"❌ Error: {str(e)}")
+        L(traceback.format_exc())
+        return None, log
+
+    return _run_raw_material_calc(products, sm_materials, domestic_formulas,
+                                   fm_file, rm_template_file, output_name, log, L, fm_mode=fm_mode,
+                                   purchases_file=purchases_file)
+
+
+def _config_to_sm_data(config):
+    """
+    Converts an in-app configured standard mix — one row per material,
+    carrying its own ratios per product and its own domestic-usage
+    multiplier, mirroring the real Standard Mix sheet's layout — into the
+    same (products, sm_materials, domestic_formulas) shape that
+    _parse_standard_mix returns from an Excel file, so both paths can share
+    _run_raw_material_calc unmodified.
+
+    Row numbers are synthetic (1-indexed by list position) — nothing outside
+    this feature reads real Excel row numbers, they only need to be unique
+    and consistent between sm_materials and domestic_formulas, which they
+    are since both are built from the same name -> row map.
+    """
+    sm_materials = [(i + 1, m['name'], m.get('unit', '')) for i, m in enumerate(config['materials'])]
+    name_to_row = {mat_name: row for row, mat_name, _ in sm_materials}
+
+    products = {
+        _norm_name(pname): {
+            'name': pname,
+            'ratios': {m['name']: m.get('ratios', {}).get(pname, 0.0) for m in config['materials']}
+        }
+        for pname in config['products']
+    }
+
+    domestic_formulas = {}
+    for m in config['materials']:
+        try:
+            mult = float(m.get('domestic_mult', 0) or 0)
+        except (TypeError, ValueError):
+            mult = 0.0
+        if not mult:
+            continue
+        row = name_to_row[m['name']]
+        ref_row = name_to_row.get(m.get('domestic_ref') or m['name'], row)
+        domestic_formulas[row] = f"EN{ref_row}*{mult}"
+
+    return products, sm_materials, domestic_formulas
+
+
+def process_raw_material_movement_from_config(config, fm_file, rm_template_file, output_name, fm_mode="expected",
+                                               purchases_file=None):
+    """Master function called from Streamlit UI — in-app configured standard mix path."""
+    log = []
+    def L(msg): log.append(msg)
+
+    L("📋 Step 1 — Using configured standard mix...")
+    products, sm_materials, domestic_formulas = _config_to_sm_data(config)
+    L(f"  ✅ {len(products)} finished product(s) | {len(sm_materials)} raw material(s) configured")
+    if domestic_formulas:
+        L(f"  ✅ Domestic usage rules configured — {len(domestic_formulas)} rule(s)")
+    else:
+        L("  ℹ️  No domestic usage rules configured — domestic usage will be 0")
+    L("  📦 Products in standard mix:")
+    for norm, p in products.items():
+        L(f"       • {p['name']}")
+
+    return _run_raw_material_calc(products, sm_materials, domestic_formulas,
+                                   fm_file, rm_template_file, output_name, log, L, fm_mode=fm_mode,
+                                   purchases_file=purchases_file)
+
+
+def _empty_rm_config():
+    return {"materials": [], "products": []}
+
+
+def _cell_str(v):
+    return "" if v is None or (isinstance(v, float) and pd.isna(v)) else str(v).strip()
+
+
+def _cell_float(v, default=0.0):
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return default
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def _render_sm_config_editor():
+    """
+    Renders the in-app Standard Mix config as ONE spreadsheet-style grid —
+    one row per raw material, one column per product, plus a domestic-usage
+    multiplier per row — mirroring the layout of the real Standard Mix
+    Excel file (materials down the rows, products across the columns) so
+    it's familiar to someone who already works with that sheet.
+
+    Keeps st.session_state["rm_config"] in sync; the grid is rebuilt from
+    this canonical dict every rerun and st.data_editor tracks user edits as
+    a diff against whatever it's given, so adding/removing a material row
+    or a product column stays in sync.
+    """
+    if "rm_config" not in st.session_state:
+        st.session_state["rm_config"] = _empty_rm_config()
+    cfg = st.session_state["rm_config"]
+
+    with st.expander("📂 Load a saved config"):
+        cfg_upload = st.file_uploader("Config file (.json)", type="json", key="rm_cfg_load")
+        if cfg_upload is not None and st.session_state.get("rm_cfg_loaded_name") != cfg_upload.name:
+            try:
+                loaded = json.load(cfg_upload)
+                loaded.setdefault("materials", [])
+                loaded.setdefault("products", [])
+                for m in loaded["materials"]:
+                    m.setdefault("ratios", {})
+                st.session_state["rm_config"] = loaded
+                st.session_state["rm_cfg_loaded_name"] = cfg_upload.name
+                # If you'd already edited the grid before loading a config,
+                # its own stored edit history would otherwise get reapplied
+                # on top of the newly loaded data instead of showing it as-is.
+                st.session_state.pop("rm_cfg_grid", None)
+                st.success(f"Loaded config from {cfg_upload.name}")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Could not read config file: {e}")
+
+    st.markdown("**Products**")
+    with st.form(key="rm_cfg_add_product_form", clear_on_submit=True):
+        fc1, fc2 = st.columns([4, 1])
+        with fc1:
+            new_prod = st.text_input(
+                "Add a product", label_visibility="collapsed",
+                placeholder="Type a product name, then press Enter or click Add Product"
+            )
+        with fc2:
+            add_clicked = st.form_submit_button("➕ Add Product", use_container_width=True)
+
+    if add_clicked:
+        name = new_prod.strip()
+        if name and name.upper() not in [p.upper() for p in cfg["products"]]:
+            cfg["products"] = cfg["products"] + [name]
+            # The product list changes the grid's COLUMN set, not just its
+            # row count. st.data_editor tracks edits as a diff (added/
+            # edited/deleted rows) against whatever it's given — right for
+            # adding/removing a material row, but a changed column set
+            # makes the old diff apply to the wrong shape, which is what
+            # made an existing product's ratios look like they'd reset.
+            # Clearing it here forces a clean rebuild from cfg (which
+            # already has every previously-entered ratio) instead of
+            # reconciling a stale diff against the new columns.
+            st.session_state.pop("rm_cfg_grid", None)
+        st.rerun()
+
+    if cfg["products"]:
+        for i, p in enumerate(cfg["products"]):
+            pc1, pc2 = st.columns([5, 1])
+            with pc1:
+                st.write(f"• {p}")
+            with pc2:
+                if st.button("✕ Remove", key=f"rm_cfg_remove_prod_{i}"):
+                    cfg["products"] = [x for x in cfg["products"] if x != p]
+                    st.session_state.pop("rm_cfg_grid", None)
+                    st.rerun()
+    else:
+        st.info("Add at least one product above to build the grid.")
+        st.download_button("💾 Download this config (.json)", data=json.dumps(cfg, indent=2),
+                            file_name="standard_mix_config.json", mime="application/json", key="rm_cfg_download")
+        return
+
+    old_by_name = {m["name"]: m for m in cfg["materials"]}
+    columns = ["Material", "Unit", "Domestic usage (×)", "Domestic ref."] + cfg["products"]
+    grid_rows = []
+    for m in cfg["materials"]:
+        row = {
+            "Material": m["name"],
+            "Unit": m.get("unit", ""),
+            "Domestic usage (×)": m.get("domestic_mult", 0.0),
+            "Domestic ref.": m.get("domestic_ref") or m["name"],
+        }
+        for p in cfg["products"]:
+            row[p] = m.get("ratios", {}).get(p, 0.0)
+        grid_rows.append(row)
+    grid_df = pd.DataFrame(grid_rows, columns=columns)
+
+    mat_names = [m["name"] for m in cfg["materials"]] or [""]
+    st.markdown("**Standard Mix**")
+    st.caption(
+        "One row per raw material — just like your standard mix sheet. Each product column "
+        "holds the quantity of that material needed per **1 unit** of the product. "
+        "**Domestic usage (×)** = a multiplier applied to the **Domestic ref.** material's own "
+        "production total (pick the same material for a self-reference); leave 0 if not used."
+    )
+    edited = st.data_editor(
+        grid_df, num_rows="dynamic", key="rm_cfg_grid", use_container_width=True,
+        column_config={"Domestic ref.": st.column_config.SelectboxColumn(options=mat_names)},
+    )
+
+    new_materials, seen = [], set()
+    for _, row in edited.iterrows():
+        name = _cell_str(row.get("Material"))
+        if not name or name.upper() in seen:
+            continue
+        seen.add(name.upper())
+        new_materials.append({
+            "name": name,
+            "unit": _cell_str(row.get("Unit")),
+            "domestic_mult": _cell_float(row.get("Domestic usage (×)"), 0.0),
+            "domestic_ref": _cell_str(row.get("Domestic ref.")) or name,
+            "ratios": {p: _cell_float(row.get(p), 0.0) for p in cfg["products"]},
+        })
+    cfg["materials"] = new_materials
+
+    st.download_button("💾 Download this config (.json)", data=json.dumps(cfg, indent=2),
+                        file_name="standard_mix_config.json", mime="application/json", key="rm_cfg_download")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1445,19 +1988,34 @@ if tool == "Excel Stock Movement Filler":
     st.header("Excel Stock Movement Filler")
     output_name   = st.text_input("Output Filename", value="filled_template")
     output_name   = output_name.removesuffix(".xlsx").strip() + ".xlsx"
+
+    match_label = st.radio(
+        "Match products by",
+        ["Product Code (existing)", "Product Name"],
+        horizontal=True,
+        help="Product Code: uses the short code in column C of your template (the usual bakery-style "
+             "template). Product Name: matches on the full product name instead — use this when column "
+             "C holds something else (like a unit of measure) instead of a unique per-product code."
+    )
+    match_by = "code" if match_label == "Product Code (existing)" else "name"
+
     template_file = st.file_uploader("Upload Template (.xlsx)", type="xlsx")
     report_file   = st.file_uploader("Upload Movement Report (.xlsx)", type="xlsx")
-    damages_file  = st.file_uploader("Upload Damages (.xlsx)", type="xlsx")
+    damages_file  = st.file_uploader(
+        "Upload Damages (.xlsx) — optional",
+        type="xlsx",
+        help="Leave empty if this business doesn't track damages separately; damages will be treated as zero."
+    )
     if st.button("Process Files"):
-        if template_file and report_file and damages_file:
+        if template_file and report_file:
             with st.spinner("Processing..."):
-                out = process_excel(template_file, report_file, damages_file, output_name)
+                out = process_excel(template_file, report_file, damages_file, output_name, match_by=match_by)
                 if out:
                     st.success("Done!")
                     st.download_button("Download", data=out, file_name=output_name,
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         else:
-            st.warning("Upload all 3 files.")
+            st.warning("Upload the Template and Movement Report.")
 
 
 # ── TOOL 2 UI ────────────────────────────────────────────────────────────────
@@ -1595,18 +2153,47 @@ elif tool == "Raw Material Movement Filler":
     """)
 
     st.markdown("---")
+    sm_mode = st.radio(
+        "Standard Mix source",
+        ["Upload Excel file", "Configure in-app"],
+        key="rm_sm_mode", horizontal=True,
+        help="Upload your existing Standard Mix Excel file, or build/edit one directly in the app."
+    )
+
+    sm_file = None
+    if sm_mode == "Configure in-app":
+        st.markdown("#### Configure Standard Mix")
+        _render_sm_config_editor()
+        st.markdown("---")
+
+    fm_mode_label = st.radio(
+        "Finished Movement quantity source",
+        ["Expected quantity (existing)", "Stock Received (Kombucha-style)"],
+        key="rm_fm_mode", horizontal=True,
+        help="Expected quantity: reads Tool 1's EXPECTED column, for a bakery-style Tool 1 output. "
+             "Stock Received: reads Tool 1's STOCK RECEIVED column instead, for a Kombucha-style "
+             "output where raw material usage is driven by units received into stock that day."
+    )
+    fm_mode = "expected" if fm_mode_label == "Expected quantity (existing)" else "stock_in"
+
     c1, c2, c3 = st.columns(3)
     with c1:
-        sm_file = st.file_uploader(
-            "① Standard Mix (.xlsx)",
-            type="xlsx", key="rm_sm",
-            help="Your company's standard mix with products and raw material ratios."
-        )
+        if sm_mode == "Upload Excel file":
+            sm_file = st.file_uploader(
+                "① Standard Mix (.xlsx)",
+                type="xlsx", key="rm_sm",
+                help="Your company's standard mix with products and raw material ratios."
+            )
+        else:
+            cfg = st.session_state.get("rm_config", _empty_rm_config())
+            st.markdown("**① Standard Mix**")
+            st.caption(f"Using configured standard mix — {len(cfg['materials'])} material(s), "
+                       f"{len(cfg['products'])} product(s).")
     with c2:
         fm_file = st.file_uploader(
             "② Finished Goods Movement (.xlsx)",
             type="xlsx", key="rm_fm",
-            help="Output of Tool 1 — must contain the EXPECTED column (col F)."
+            help="Output of Tool 1 — EXPECTED or STOCK RECEIVED column, matching the source picked above."
         )
     with c3:
         rm_file = st.file_uploader(
@@ -1615,16 +2202,37 @@ elif tool == "Raw Material Movement Filler":
             help="Your blank raw material movement template (company-specific)."
         )
 
+    with st.expander("④ Optional: fill STOCK RECEIVED from a Purchases Report"):
+        st.caption(
+            "Raw material stock actually starts at purchasing, not at production — without this, "
+            "STOCK ISSUED TO PRODUCTION gets filled but STOCK RECEIVED stays empty and the sheet's "
+            "running Balance drifts negative. Upload Tool 2's enriched Purchases Report (with the "
+            "raw material item names already edited to match this standard mix, and quantities "
+            "already converted to the units this template uses) and it'll fill STOCK RECEIVED Qty "
+            "and Unit Price for each raw material on the exact day it was purchased, within this "
+            "template's own date range. Purchased items that don't match a material, or materials "
+            "with no matching purchases, are left alone. Leave this empty to skip it entirely."
+        )
+        purchases_file = st.file_uploader(
+            "Enriched Purchases Report (.xlsx)",
+            type="xlsx", key="rm_purchases",
+            help="Output of Tool 2's EFRIS Invoice Enricher."
+        )
+
     out_name_rm = st.text_input("Output Filename", value="raw_material_filled", key="rm_out")
     out_name_rm = out_name_rm.removesuffix(".xlsx").strip() + ".xlsx"
 
-    # Show previews of each uploaded file
+    # Show previews of each uploaded file. Converted to strings before
+    # display — a raw header=None read mixes real dates with blank
+    # separator rows in the same column, which pyarrow (Streamlit's
+    # dataframe renderer) can't serialize directly; this is a preview only,
+    # not what actually gets parsed for processing.
     if sm_file:
         try:
             sm_prev = pd.read_excel(sm_file, header=None, nrows=4)
             sm_file.seek(0)
             with st.expander("Preview: Standard Mix (first 4 rows)"):
-                st.dataframe(sm_prev, use_container_width=True)
+                st.dataframe(sm_prev.astype(str), use_container_width=True)
         except Exception:
             pass
 
@@ -1633,7 +2241,7 @@ elif tool == "Raw Material Movement Filler":
             fm_prev = pd.read_excel(fm_file, header=None, nrows=8)
             fm_file.seek(0)
             with st.expander("Preview: Finished Goods Movement (first 8 rows)"):
-                st.dataframe(fm_prev, use_container_width=True)
+                st.dataframe(fm_prev.astype(str), use_container_width=True)
         except Exception:
             pass
 
@@ -1642,21 +2250,37 @@ elif tool == "Raw Material Movement Filler":
             rm_prev = pd.read_excel(rm_file, header=None, nrows=8)
             rm_file.seek(0)
             with st.expander("Preview: Raw Material Template (first 8 rows)"):
-                st.dataframe(rm_prev, use_container_width=True)
+                st.dataframe(rm_prev.astype(str), use_container_width=True)
         except Exception:
             pass
 
-    all_uploaded = sm_file and fm_file and rm_file
+    if sm_mode == "Upload Excel file":
+        sm_ready = bool(sm_file)
+    else:
+        rm_cfg = st.session_state.get("rm_config", _empty_rm_config())
+        sm_ready = bool(rm_cfg["materials"]) and bool(rm_cfg["products"])
+
+    all_uploaded = sm_ready and fm_file and rm_file
     if not all_uploaded:
-        st.info("Upload all three files above to proceed.")
+        if sm_mode == "Upload Excel file":
+            st.info("Upload all three files above to proceed.")
+        else:
+            st.info("Configure at least one material and one product above, and upload the "
+                     "Finished Goods Movement and Raw Material Template, to proceed.")
 
     if st.button("⚙️  Generate Raw Material Movement", disabled=not all_uploaded, key="rm_run"):
         st.markdown("---")
         log_ph = st.empty()
         with st.spinner("Processing..."):
-            out_bytes, log_lines = process_raw_material_movement(
-                sm_file, fm_file, rm_file, out_name_rm
-            )
+            if sm_mode == "Upload Excel file":
+                out_bytes, log_lines = process_raw_material_movement(
+                    sm_file, fm_file, rm_file, out_name_rm, fm_mode=fm_mode, purchases_file=purchases_file
+                )
+            else:
+                out_bytes, log_lines = process_raw_material_movement_from_config(
+                    st.session_state["rm_config"], fm_file, rm_file, out_name_rm, fm_mode=fm_mode,
+                    purchases_file=purchases_file
+                )
         # Show log
         log_ph.markdown(
             '<div class="log-box">' + "<br>".join(log_lines) + "</div>",
